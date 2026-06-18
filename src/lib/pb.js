@@ -18,49 +18,53 @@ if (PB_READY) {
 }
 
 function assertReady() {
-  if (!PB_URL) {
-    throw new Error(
-      "Falta VITE_PB_URL. Define la URL de PocketBase en .env (ej: http://127.0.0.1:8090)."
-    );
-  }
-  if (!PB_TOKEN) {
-    throw new Error(
-      "Falta VITE_PB_TOKEN. Configura el token de PocketBase en .env para que la app funcione."
-    );
+  // Sin valores sensibles: solo se indica que falta configuracion requerida.
+  if (!PB_URL || !PB_TOKEN) {
+    throw new Error("CONFIG: faltan variables de entorno requeridas.");
   }
 }
 
-// Modelo: un record por usuario en la coleccion.
-//   { email: string, json: string[] (palabras en MAYUSCULAS, sin repetir) }
-// Las palabras se guardan en el campo "json" (tipo JSON) de la coleccion.
+// ===========================================================================
+// MODELO (una sola coleccion, dos tipos de registro distinguidos por `text`):
+//   - VOTO : { email: correo, json: string[] (palabras),            text: "" }
+//   - TAG  : { email: creador, json: [{id,author,body,ts,edited}],  text: TAG }
+// `text` vacio -> registro de voto;  `text` con valor -> el record del tag,
+// que contiene TODO su chat dentro de `json`. Un solo record por tag.
+// ===========================================================================
 
-// Lee el array de palabras de un record (el campo json puede venir null/objeto).
+// Escapa comillas para usar un valor dentro de un filtro de PocketBase.
+function q(value) {
+  return String(value).replace(/"/g, '\\"');
+}
+
+// Filtro que selecciona SOLO registros de voto (text vacio o nulo).
+const VOTE_FILTER = '(text="" || text=null)';
+
+// Lee el array de palabras de un record de voto.
 function wordsOf(record) {
   return Array.isArray(record?.json) ? record.json : [];
 }
 
-// Busca el record del usuario por email. Devuelve null si no existe.
+// Busca el record de VOTO del usuario por email. Devuelve null si no existe.
 async function findUserRecord(email) {
   try {
     return await pb
       .collection(COLLECTION)
-      .getFirstListItem(`email="${email.replace(/"/g, '\\"')}"`);
+      .getFirstListItem(`email="${q(email)}" && ${VOTE_FILTER}`);
   } catch (err) {
     if (err && err.status === 404) return null;
     throw err;
   }
 }
 
-// Garantiza que exista el record del usuario. Lo crea (json: []) si no existe.
-// Idempotente y con manejo de carrera (dos pestañas creando a la vez).
+// Garantiza que exista el record de voto del usuario. Lo crea (json: []) si no existe.
 export async function ensureUser(email) {
   assertReady();
   const existing = await findUserRecord(email);
   if (existing) return existing;
   try {
-    return await pb.collection(COLLECTION).create({ email, json: [] });
+    return await pb.collection(COLLECTION).create({ email, json: [], text: "" });
   } catch (err) {
-    // Si otro proceso lo creo en paralelo, re-consulta.
     const again = await findUserRecord(email);
     if (again) return again;
     throw err;
@@ -68,7 +72,6 @@ export async function ensureUser(email) {
 }
 
 // Agrega una palabra al record del usuario.
-// Devuelve { ok, error } — error si el usuario ya la habia enviado.
 export async function addWord(email, rawWord) {
   assertReady();
   const norm = normalizeWord(rawWord);
@@ -84,7 +87,7 @@ export async function addWord(email, rawWord) {
   return { ok: true, word };
 }
 
-// Devuelve el array de palabras (votos) del usuario actual. [] si no tiene record.
+// Devuelve el array de palabras (votos) del usuario actual.
 export async function getMyWords(email) {
   assertReady();
   const record = await findUserRecord(email);
@@ -92,7 +95,6 @@ export async function getMyWords(email) {
 }
 
 // Quita una palabra (el voto del usuario) de su record.
-// Devuelve { ok, removed }. removed=false si no la tenia.
 export async function removeWord(email, rawWord) {
   assertReady();
   const norm = normalizeWord(rawWord);
@@ -110,23 +112,155 @@ export async function removeWord(email, rawWord) {
   return { ok: true, removed: true, word };
 }
 
-// Trae SOLO el campo json de todos los records (no expone emails) y los mezcla:
-// cuenta en cuantos usuarios aparece cada palabra -> relevancia.
+// Cuenta en cuantos usuarios aparece cada palabra -> relevancia.
 export async function getWordCounts() {
   assertReady();
   const records = await pb.collection(COLLECTION).getFullList({
     fields: "json",
+    filter: VOTE_FILTER, // solo registros de voto, nunca records de tag
     batch: 500,
   });
   const counts = new Map();
   for (const rec of records) {
-    // Set para que un mismo usuario cuente como 1 por palabra (defensivo).
     for (const w of new Set(wordsOf(rec))) {
       counts.set(w, (counts.get(w) || 0) + 1);
     }
   }
-  // [{ word, count }] ordenado por relevancia desc.
   return [...counts.entries()]
     .map(([word, count]) => ({ word, count }))
     .sort((a, b) => b.count - a.count || a.word.localeCompare(b.word));
+}
+
+// ===========================================================================
+// CHAT POR TAG: UN SOLO record por tag contiene todo el chat dentro de `json`.
+//   { text: TAG, email: creador, json: [ {id, author, body, ts, edited} ] }
+// ===========================================================================
+
+const MAX_MSG_LEN = 1000;
+
+function tagKey(rawWord) {
+  const n = normalizeWord(rawWord);
+  return n.ok ? n.word : null;
+}
+
+// Lee el array de mensajes de un record de tag.
+function messagesOf(rec) {
+  return Array.isArray(rec?.json) ? rec.json : [];
+}
+
+function newId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// Busca el record del tag por su nombre. null si no existe.
+async function findTagRecord(tag) {
+  try {
+    return await pb.collection(COLLECTION).getFirstListItem(`text="${q(tag)}"`);
+  } catch (err) {
+    if (err && err.status === 404) return null;
+    throw err;
+  }
+}
+
+// Garantiza el record del tag (lo crea con chat vacio si no existe).
+async function ensureTagRecord(tag, creator) {
+  const existing = await findTagRecord(tag);
+  if (existing) return existing;
+  try {
+    return await pb
+      .collection(COLLECTION)
+      .create({ text: tag, email: creator || "", json: [] });
+  } catch (err) {
+    const again = await findTagRecord(tag);
+    if (again) return again;
+    throw err;
+  }
+}
+
+// Devuelve los mensajes del chat de un tag (array; [] si no hay record).
+export async function getMessages(rawWord) {
+  assertReady();
+  const tag = tagKey(rawWord);
+  if (!tag) return [];
+  const rec = await findTagRecord(tag);
+  return rec ? messagesOf(rec) : [];
+}
+
+// Publica un mensaje (lo agrega al array del record del tag).
+// author = correo del usuario (se guarda, no se muestra en el dashboard).
+export async function postMessage(rawWord, author, rawBody) {
+  assertReady();
+  const tag = tagKey(rawWord);
+  if (!tag) return { ok: false, error: "Tag no valido." };
+  const body = String(rawBody || "").trim();
+  if (!body) return { ok: false, error: "Escribe un mensaje." };
+  if (body.length > MAX_MSG_LEN) return { ok: false, error: `Maximo ${MAX_MSG_LEN} caracteres.` };
+  const rec = await ensureTagRecord(tag, author);
+  const msg = { id: newId(), author: author || "", body, ts: Date.now(), edited: false };
+  const updated = await pb
+    .collection(COLLECTION)
+    .update(rec.id, { json: [...messagesOf(rec), msg] });
+  return { ok: true, messages: messagesOf(updated) };
+}
+
+// Edita un mensaje propio dentro del record del tag (match por id + autor).
+export async function editMessage(rawWord, msgId, author, rawBody) {
+  assertReady();
+  const tag = tagKey(rawWord);
+  if (!tag) return { ok: false, error: "Tag no valido." };
+  const body = String(rawBody || "").trim();
+  if (!body) return { ok: false, error: "Escribe un mensaje." };
+  if (body.length > MAX_MSG_LEN) return { ok: false, error: `Maximo ${MAX_MSG_LEN} caracteres.` };
+  const rec = await findTagRecord(tag);
+  if (!rec) return { ok: false, error: "No existe el chat." };
+  const a = (author || "").toLowerCase();
+  const next = messagesOf(rec).map((m) =>
+    m.id === msgId && (m.author || "").toLowerCase() === a
+      ? { ...m, body, edited: true }
+      : m
+  );
+  const updated = await pb.collection(COLLECTION).update(rec.id, { json: next });
+  return { ok: true, messages: messagesOf(updated) };
+}
+
+// Suscripcion en tiempo real al record del tag. Entrega el array completo de
+// mensajes en cada cambio. Devuelve una funcion para cancelar.
+export async function subscribeMessages(rawWord, onMessages) {
+  const tag = tagKey(rawWord);
+  if (!tag) return () => {};
+  return await pb.collection(COLLECTION).subscribe("*", (e) => {
+    if (!e?.record) return;
+    if ((e.record.text || "") !== tag) return;
+    onMessages(e.action === "delete" ? [] : messagesOf(e.record));
+  });
+}
+
+// Borra el chat completo de un tag (su unico record). Se usa cuando el tag
+// pierde su ultimo voto y desaparece.
+export async function deleteTagChat(rawWord) {
+  assertReady();
+  const tag = tagKey(rawWord);
+  if (!tag) return { ok: false, removed: 0 };
+  const rec = await findTagRecord(tag);
+  if (!rec) return { ok: true, removed: 0 };
+  await pb.collection(COLLECTION).delete(rec.id);
+  return { ok: true, removed: 1 };
+}
+
+// Borra un mensaje propio del record del tag (match por id + autor).
+export async function deleteMessage(rawWord, msgId, author) {
+  assertReady();
+  const tag = tagKey(rawWord);
+  if (!tag) return { ok: false, error: "Tag no valido." };
+  const rec = await findTagRecord(tag);
+  if (!rec) return { ok: false, error: "No existe el chat." };
+  const a = (author || "").toLowerCase();
+  const msgs = messagesOf(rec);
+  const next = msgs.filter(
+    (m) => !(m.id === msgId && (m.author || "").toLowerCase() === a)
+  );
+  if (next.length === msgs.length) return { ok: true, messages: msgs }; // no es tuyo
+  const updated = await pb.collection(COLLECTION).update(rec.id, { json: next });
+  return { ok: true, messages: messagesOf(updated) };
 }

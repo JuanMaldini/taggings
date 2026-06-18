@@ -4,3 +4,6 @@ dist
 .env.local
 .DS_Store
 *.log
+
+# Temporales de Vite
+vite.config.*.timestamp-*

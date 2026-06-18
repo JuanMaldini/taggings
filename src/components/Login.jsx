@@ -1,10 +1,8 @@
 import { useState, useEffect } from "react";
 import { validateEmail } from "../lib/words.js";
 import { setSession } from "../lib/session.js";
-import { ensureUser, PB_READY, PB_URL, PB_COLLECTION, PB_TOKEN } from "../lib/pb.js";
+import { ensureUser, PB_READY } from "../lib/pb.js";
 import { formatPbError } from "../lib/errors.js";
-
-const PB_ENV = { PB_URL, PB_COLLECTION, PB_TOKEN };
 
 export default function Login({ onLogin, onClose }) {
   const [email, setEmail] = useState("");
@@ -32,8 +30,8 @@ export default function Login({ onLogin, onClose }) {
       return;
     }
     if (!PB_READY) {
-      setError("La app no esta configurada (revisa VITE_PB_URL y VITE_PB_TOKEN en .env).");
-      setErrorDetail("PB_READY = false (falta URL o token).");
+      setError("La aplicación no está configurada correctamente.");
+      setErrorDetail("Faltan variables de entorno requeridas.");
       return;
     }
 
@@ -46,9 +44,9 @@ export default function Login({ onLogin, onClose }) {
       setSession(res.email);
       onLogin({ email: res.email });
     } catch (err) {
-      const f = formatPbError(err, { where: "Login.handleSubmit / ensureUser" }, PB_ENV);
+      const f = formatPbError(err, { where: "Login.handleSubmit / ensureUser" });
       setError(
-        f.status ? "No se pudo entrar (HTTP " + f.status + ")." : "No se pudo conectar con PocketBase."
+        f.status ? "No se pudo entrar (HTTP " + f.status + ")." : "No se pudo conectar con el servidor."
       );
       setErrorDetail(f.hint);
     } finally {

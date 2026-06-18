@@ -3,10 +3,6 @@
 
 // ===========================================================================
 // MULTIPLICADOR DEL TAMANO DE LAS PALABRAS  (ajustalo aqui, NO en .env)
-// Controla cuanto crece la palabra mas votada respecto a la menos votada.
-//   1    = crecimiento original (palabra grande llega a ~64px)
-//   0.25 = un cuarto de ese crecimiento (actual)
-//   2    = el doble, etc.
 const SIZE_MULTIPLIER = 0.25;
 // ===========================================================================
 
@@ -20,7 +16,7 @@ function fontSizeFor(count, max) {
   return Math.round(MIN_FONT + t * MAX_GROWTH);
 }
 
-// Color estable por palabra (HSL) -> "colorfull" pero consistente entre renders.
+// Color estable por palabra (HSL).
 function colorFor(word) {
   let h = 0;
   for (let i = 0; i < word.length; i++) {
@@ -44,7 +40,7 @@ function spiralPositions(n) {
   return pts;
 }
 
-export default function WordCloud({ items, mine, onWordClick, canVote }) {
+export default function WordCloud({ items, mine, onWordClick, onOpenChat, canVote }) {
   if (!items.length) {
     return (
       <div className="cloud cloud--empty">
@@ -68,28 +64,45 @@ export default function WordCloud({ items, mine, onWordClick, canVote }) {
           color: colorFor(item.word),
           fontSize: `${size}px`,
         };
-        const inner = (
-          <>
-            <span className="cloud__text">{item.word}</span>
-            <span className="cloud__count">×{item.count}</span>
-          </>
-        );
 
-        // Con sesion, cualquier palabra es clicable: las tuyas quitan tu voto,
-        // las demas suman tu voto. Sin sesion, solo se muestran.
+        // Con sesion: tarjeta con 3 zonas -> nombre (vota al click) · ×multiplicador
+        // (chico) · boton de chat. Sin sesion: solo se muestra el texto y el conteo.
         if (canVote) {
-          const className =
-            "cloud__word " + (isMine ? "cloud__word--mine" : "cloud__word--votable");
           return (
-            <button
+            <div
               key={item.word}
-              type="button"
-              className={className}
+              className={"cloud__word cloud__card " + (isMine ? "is-mine" : "is-votable")}
               style={style}
-              onClick={() => onWordClick && onWordClick(item.word)}
             >
-              {inner}
-            </button>
+              <button
+                type="button"
+                className="cloud__vote"
+                title={isMine ? "quitar mi voto" : "votar"}
+                onClick={() => onWordClick && onWordClick(item.word)}
+              >
+                {item.word}
+              </button>
+              <div className="cloud__meta">
+                <span className="cloud__count">×{item.count}</span>
+                <button
+                  type="button"
+                  className="cloud__chat"
+                  aria-label={`Abrir chat de ${item.word}`}
+                  title="Abrir chat"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenChat && onOpenChat(item.word);
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 4V6a2 2 0 0 1 2-2Z"
+                    />
+                  </svg>
+                </button>
+              </div>
+            </div>
           );
         }
 
@@ -101,7 +114,8 @@ export default function WordCloud({ items, mine, onWordClick, canVote }) {
             style={style}
             title={`${item.word} · ${item.count}`}
           >
-            {inner}
+            <span className="cloud__text">{item.word}</span>
+            <span className="cloud__count">×{item.count}</span>
           </div>
         );
       })}
