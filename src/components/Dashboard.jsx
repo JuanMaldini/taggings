@@ -220,7 +220,7 @@ export default function Dashboard({ email, onLogout, onOpenLogin }) {
           <div className="composer__field">
             <input
               className="input input--big"
-              placeholder="Escribe una palabra y presiona Enter"
+              placeholder="Tag"
               value={value}
               onChange={(e) => {
                 setValue(e.target.value);
